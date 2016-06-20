@@ -244,12 +244,19 @@ bool SetHops(int sock, const address &addr, int ttl) {
 }
 
 bool RequireToAddress(int sock, const address &addr) {
-#ifdef IPV6_PKTINFO
-	if (addr.family() == AF_INET6) {
-		int on = 1;
-		return setsockopt(sock, IPPROTO_IPV6, IPV6_PKTINFO, &on, sizeof(on)) == 0;
-	}
+#if defined(IPV6_RECVPKTINFO) || defined(IPV6_PKTINFO)
+	int on = 1;
 #endif
+
+	if (addr.family() == AF_INET6) {
+#ifdef IPV6_RECVPKTINFO
+		/* RFC 3542 / glibc >= 2.5 */
+		return setsockopt(sock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on, sizeof(on)) == 0;
+#elif defined(IPV6_PKTINFO)
+		/* RFC 2292 / glibc <= 2.4 */
+		return setsockopt(sock, IPPROTO_IPV6, IPV6_PKTINFO, &on, sizeof(on)) == 0;
+#endif
+	}
 
 	return true;
 }
