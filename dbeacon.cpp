@@ -41,7 +41,7 @@
 
 using namespace std;
 
-const char * const versionInfo = "0.3.9.2 ($Rev$)";
+const char * const versionInfo = "0.3.9.2p1 ($Rev$)";
 
 const char * const defaultIPv6SSMChannel = "ff3e::beac";
 const char * const defaultIPv4SSMChannel = "232.2.3.2";
@@ -247,7 +247,7 @@ static void d_logv(int level, const char *format, va_list vl)
 	vsnprintf(buffer, sizeof(buffer), format, vl);
 
 	if (use_syslog && past_init) {
-		syslog(level, "%s",buffer);
+		syslog(level, buffer);
 	} else {
 		char tbuf[64];
 		timeval tv;
@@ -1112,79 +1112,55 @@ void Stats::check_validity(uint64_t now) {
 		valid = false;
 }
 
-typedef std::set<address> SourceSet;
-typedef std::map<address, SourceSet> SourceMap;
-typedef std::map<address, SourceMap> GroupMap;
-static GroupMap groupMap;
+typedef std::pair<address, address> SGPair;
+struct SGInfo {
+	int count;
+#define SGINFO_F_JOIN_FAILED	0x0001
+	uint32_t flags;
+};
+typedef std::map<SGPair, SGInfo> SGCountMap;
+static SGCountMap countMap;
 
 static void CountSSMJoin(const address &group, const address &source) {
-	address source_addr;
-	char tmp[64], tmp2[64], tmp3[64];
-	
-	source_addr.set_family(source.family());
-	source_addr.copy_address(source);
-	source_addr.set_port(0);
-	GroupMap::iterator g = groupMap.find(group);
-	if (g == groupMap.end()) {
-		if (verbose) 
-			info("Registering SSM group %s", group.to_string(tmp, sizeof(tmp)));
-		g = groupMap.insert(std::make_pair(group, SourceMap())).first;
-	}
-	SourceMap::iterator s = g->second.find(source_addr);
-	if (s == g->second.end()) {
-		if (verbose)
-			info("Joining (%s, %s)", source_addr.to_string(tmp, sizeof(tmp)),
-			     group.to_string(tmp2, sizeof(tmp2)));
-		if (SSMJoin(ssmMcastSock, group, source_addr) < 0) {
+	SGCountMap::iterator j = countMap.find(SGPair(group, source));
+
+	if (j == countMap.end()) {
+		j = countMap.insert(std::make_pair(SGPair(group, source), SGInfo())).first;
+		j->second.count = 1;
+		j->second.flags = SGINFO_F_JOIN_FAILED;
+	} else
+		j->second.count++;
+
+	if (j->second.flags & SGINFO_F_JOIN_FAILED) {
+		char tmp[64];
+
+		if (SSMJoin(ssmMcastSock, group, source) < 0) {
 			if (verbose)
-				info("Join failed, reason: %s", strerror(errno));
-			return;
+				info("Failed to join SSM (S,G) where S = %s, reason: %s",
+					source.to_string(tmp, sizeof(tmp)), strerror(errno));
 		} else {
-			s = g->second.insert(std::make_pair(source_addr, SourceSet())).first;
+			if (verbose > 1)
+				info("Joined SSM (S, G) where S = %s", source.to_string(tmp, sizeof(tmp)));
+
+			j->second.flags &= ~SGINFO_F_JOIN_FAILED;
 		}
-	} 
-	SourceSet::iterator ss = s->second.find(source);
-	if (ss == s->second.end()) {
-		if (verbose)
-			info("Adding beacon %s to (%s, %s)", source.to_string(tmp, sizeof(tmp)),
-			     source_addr.to_string(tmp2, sizeof(tmp2)),
-			     group.to_string(tmp3, sizeof(tmp3)));
-		s->second.insert(source);
 	}
 }
 
 static void CountSSMLeave(const address &group, const address &source) {
-	address source_addr;
-	char tmp[64], tmp2[64];
+	SGCountMap::iterator j = countMap.find(SGPair(group, source));
 
-	GroupMap::iterator g = groupMap.find(group);
-	assert(g != groupMap.end());
-	source_addr.set_family(source.family());
-	source_addr.copy_address(source);
-	source_addr.set_port(0);
-	SourceMap::iterator s = g->second.find(source_addr);
-	assert(s != g->second.end());
-	SourceSet::iterator ss = s->second.find(source);
-	if (ss == s->second.end()) {
+	/* This should actually be assert(j != countMap.end()); */
+	if (j == countMap.end())
 		return;
-	}
-	if (verbose)
-		info("Removing beacon %s from (%s, %s)", source.to_string(tmp, sizeof(tmp)),
-		     source_addr.to_string(tmp2, sizeof(tmp2)),
-		     group.to_string(tmp2, sizeof(tmp2)));
-	s->second.erase(ss);
-	if (s->second.empty()) {
-		if (verbose)
-			info("No more beacons for (%s, %s), leaving group",
-			     source_addr.to_string(tmp, sizeof(tmp)),
-			     group.to_string(tmp2, sizeof(tmp2)));
-		SSMLeave(ssmMcastSock,group, source_addr);
-		g->second.erase(s);
-	}
-	if (g->second.empty()) {
-		if (verbose)
-			info("No more sources, unregistering group %s, ", group.to_string(tmp, sizeof(tmp)));
-		groupMap.erase(g);
+
+	j->second.count--;
+
+	if (j->second.count == 0) {
+		if (!(j->second.flags & SGINFO_F_JOIN_FAILED))
+			SSMLeave(ssmMcastSock,group, source);
+
+		countMap.erase(j);
 	}
 }
 
@@ -1518,7 +1494,7 @@ void do_dump() {
 			fprintf(fp, " contact=\"%s\"", adminContact.c_str());
 		if (!twoLetterCC.empty())
 			fprintf(fp, " country=\"%s\"", twoLetterCC.c_str());
-		fprintf(fp, " age=\"%lu\" lastupdate=\"0\" rxlocal=\"true\">\n", (now - startTime) / 1000);
+		fprintf(fp, " age=\"%llu\" lastupdate=\"0\" rxlocal=\"true\">\n", (now - startTime) / 1000);
 
 		for (uint32_t k = 0; k < KnownFlags; k++) {
 			if (flags & (1 << k)) {
@@ -1545,8 +1521,8 @@ void do_dump() {
 			if (!i->second.CC.empty())
 				fprintf(fp, " country=\"%s\"", i->second.CC.c_str());
 
-			fprintf(fp, " age=\"%lu\"", (now - i->second.creation) / 1000);
-			fprintf(fp, " lastupdate=\"%lu\">\n", (now - i->second.lastevent) / 1000);
+			fprintf(fp, " age=\"%llu\"", (now - i->second.creation) / 1000);
+			fprintf(fp, " lastupdate=\"%llu\">\n", (now - i->second.lastevent) / 1000);
 
 			if (i->second.ASM.s.valid)
 				dumpStats(fp, "asm", i->second.ASM.s, now, i->second.sttl, true);
@@ -1570,9 +1546,9 @@ void do_dump() {
 				fprintf(fp, " contact=\"%s\"", i->second.adminContact.c_str());
 		}
 		fprintf(fp, " addr=\"%s\"", i->first.to_string(tmp, sizeof(tmp)));
-		fprintf(fp, " age=\"%lu\"", (now - i->second.creation) / 1000);
+		fprintf(fp, " age=\"%llu\"", (now - i->second.creation) / 1000);
 		fprintf(fp, " rxlocal=\"%s\"", i->second.rxlocal(now) ? "true" : "false");
-		fprintf(fp, " lastupdate=\"%lu\">\n", (now - i->second.lastevent) / 1000);
+		fprintf(fp, " lastupdate=\"%llu\">\n", (now - i->second.lastevent) / 1000);
 
 		for (uint32_t k = 0; k < KnownFlags; k++) {
 			if (i->second.Flags & (1 << k)) {

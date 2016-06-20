@@ -425,7 +425,7 @@ sub start_handler {
 			$adj{$current_beacon}[RX_LOCAL] = $atts{'rxlocal'} if defined $atts{'rxlocal'};
 		}
 	} elsif ($tag eq 'asm' or $tag eq 'ssm') {
-		foreach my $att qw(ttl loss delay jitter) {
+		foreach my $att ("ttl","loss","delay","jitter") {
 			if (defined $atts{$att}) {
 				my $index = $tag eq 'ssm' ? 2 : 1;
 
@@ -1173,7 +1173,7 @@ sub store_data_one {
 	update_ttl_hist(build_history_file_path($dst_h, $src_h) . "/$tag-ttl-hist",
 		$adj{$dst}[NEIGH]{$src}[$index]{'ttl'}) if defined $adj{$dst}[NEIGH]{$src}[$index]{'ttl'};
 
-	foreach my $type qw(ttl loss delay jitter) {
+	foreach my $type ("ttl","loss","delay","jitter") {
 		$values{$type} = $adj{$dst}[NEIGH]{$src}[$index]{$type};
 		$good++ if defined $values{$type};
 	}
@@ -1265,7 +1265,7 @@ sub storedata {
 	# Update rrd with new values
 
 	my $updatestring = 'N';
-	foreach my $valuetype qw(ttl loss delay jitter) {
+	foreach my $valuetype ("ttl","loss","delay","jitter") {
 		# Store it in s and not ms
 		$values{$valuetype} = $values{$valuetype} / 1000. if $valuetype eq 'delay' or $valuetype eq 'jitter';
 		$updatestring .= ':' . $values{$valuetype};
@@ -1646,7 +1646,7 @@ sub list_graph {
 
 		my $count = 0;
 
-		foreach my $type qw(ttl loss delay jitter) {
+		foreach my $type ("ttl","loss","delay","jitter") {
 			printx '<tr>' if ($count % 2) == 0;
 			printx '<td>';
 			graphthumb($type);
